@@ -73,4 +73,5 @@ Keeping your server synchronized with the wider Clash of Clans ecosystem and max
 ## 👤 Author
 **Bryan** | *Lead Developer*
 
-Developed under the **Dragon-Bot-CoC** Organization.
+Developed under the **Dragon-Bot-Dev** Organization.
+This content is not affiliated with, endorsed, sponsored, or specifically approved by Supercell and Supercell is not responsible for it.
