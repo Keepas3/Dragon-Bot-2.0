@@ -78,6 +78,19 @@ def get_db_cursor():
         db_connection = connect_db()
         return db_connection.cursor(buffered=True)
         
+def get_db_connection(): # Return the connection itself
+    global db_connection
+    try:
+        if db_connection is None or not db_connection.is_connected():
+            db_connection = connect_db()
+        else:
+            # Lower the delay to 0 or 1 to stay under Discord's 3s limit
+            db_connection.ping(reconnect=True, attempts=2, delay=0) 
+        return db_connection
+    except Exception as e:
+        db_connection = connect_db()
+        return db_connection
+    
 async def get_safe_cursor(retries=3, delay=3):
     """
     Attempts to connect to the DB multiple times before failing.

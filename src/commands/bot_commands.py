@@ -21,7 +21,7 @@ reddit = praw.Reddit(
 )
 
 # Import helpers from config and utils
-from config import get_db_cursor, coc_client
+from config import get_db_connection, get_db_cursor, coc_client
 from utils import (
     fetch_clan_from_db, fetch_player_from_DB, get_clan_data, 
     check_coc_clan_tag, check_coc_player_tag, get_player_data,
@@ -365,30 +365,41 @@ class BotCommands(commands.Cog):
 
     @app_commands.command(name='link', description="Link your CoC account")
     async def link(self, interaction: discord.Interaction, player_tag: str):
+    # 1. Defer immediately to give your DB ping and CoC API time to breathe
+        await interaction.response.defer(ephemeral=True) 
+
         clean_tag = player_tag.strip().upper()
         if not clean_tag.startswith("#"): clean_tag = f"#{clean_tag}"
+        
         if await check_coc_player_tag(clean_tag):
-            cursor = get_db_cursor()
-            cursor.execute("""
-            INSERT INTO players (
-                discord_id, discord_username, guild_id, guild_name, player_tag, is_premium
-            )
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE 
-                player_tag = VALUES(player_tag),
-                discord_username = VALUES(discord_username),
-                guild_name = VALUES(guild_name)
-        """, (
-            interaction.user.id, 
-            interaction.user.display_name, 
-            interaction.guild.id, 
-            interaction.guild.name, 
-            clean_tag, 
-            0  # Default to 0 for new inserts
-        ))
-            await interaction.response.send_message(f"Linked to **{clean_tag}**!")
+            try:
+                conn = get_db_connection() # Get connection
+                cursor = conn.cursor(buffered=True) # Get cursor
+                
+                cursor.execute("""
+                    INSERT INTO players (discord_id, discord_username, guild_id, player_tag, is_premium)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE 
+                        player_tag = VALUES(player_tag),
+                        discord_username = VALUES(discord_username)
+                """, (
+                    str(interaction.user.id), 
+                    interaction.user.display_name, 
+                    str(interaction.guild.id), 
+                    clean_tag, 
+                    0
+                ))
+                
+
+                conn.commit() 
+                cursor.close()
+                
+                await interaction.followup.send(f"✅ Linked to **{clean_tag}**!")
+            except Exception as e:
+                print(f"DB Error: {e}")
+                await interaction.followup.send("❌ Database error occurred.")
         else:
-            await interaction.response.send_message("Invalid player tag.", ephemeral=True)
+            await interaction.followup.send("❌ Invalid player tag.", ephemeral=True)
 
     @app_commands.command(name='unlink', description="Unlink your CoC account")
     async def unlink(self, interaction: discord.Interaction):
