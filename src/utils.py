@@ -1,4 +1,5 @@
 import re
+from zoneinfo import ZoneInfo
 import coc
 import time
 from datetime import datetime, timedelta, timezone
@@ -58,12 +59,23 @@ def fetch_player_from_DB(guild_id: int, user=None, provided_tag: str = None, cur
 
 # --- Formatting Helpers ---
 def format_datetime(dt):
-    if not dt or dt == "N/A": return "N/A"
-    dt_obj = dt.time.replace(tzinfo=timezone.utc) if hasattr(dt, 'time') else None
-    if not dt_obj: return "N/A"
-    est = dt_obj.astimezone(timezone(timedelta(hours=-5)))
-    return est.strftime('%Y-%m-%d %H:%M:%S %p EST')
+    if not dt or dt == "N/A": 
+        return "N/A"
+    
+    # coc.py Timestamps have a .time attribute (naive UTC)
+    # We make it "Aware" UTC first
+    dt_obj = dt.time.replace(tzinfo=timezone.utc) if hasattr(dt, 'time') else dt
+    
+    if not isinstance(dt_obj, datetime): 
+        return "N/A"
 
+    # Convert to the specific geographical zone
+    # This automatically handles -5 (Winter) vs -4 (Summer)
+    local_tz = ZoneInfo("America/New_York")
+    local_dt = dt_obj.astimezone(local_tz)
+    
+    # %Z will automatically print "EST" or "EDT" based on the date
+    return local_dt.strftime('%Y-%m-%d %I:%M:%S %p %Z')
 def format_month_day_year(dt):
     if not dt or dt == "N/A": return "N/A"
     dt_obj = dt.time.replace(tzinfo=timezone.utc) if hasattr(dt, 'time') else None

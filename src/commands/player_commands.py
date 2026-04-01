@@ -117,7 +117,7 @@ class PlayerCommands(commands.Cog):
 
             lines = [f"PLAYER: {player_data.name} ({player_data.tag})"]
 
-            # 2. Home Village Logic
+            # 
             if village in ["home", "both"]:
                 # Filter troops (excluding sieges and specific 'super' types)
                 troop_list = [format_lvl(t) for t in player_data.home_troops 
@@ -131,14 +131,14 @@ class PlayerCommands(commands.Cog):
                     lines.append("\n--- SIEGE MACHINES ---")
                     lines.extend(siege_list)
 
-            # 3. Builder Base Logic
+            # 
             if village in ["builder", "both"]:
                 builder_list = [format_lvl(t) for t in player_data.builder_troops]
                 if builder_list:
                     lines.append("\n--- BUILDER TROOPS ---")
                     lines.extend(builder_list)
 
-            # 4. Final Formatting (Direct Send)
+            #
             final_message = f"```yaml\n" + "\n".join(lines) + "```"
             
             # Simple safety check: Discord will 400 if it's over 2000

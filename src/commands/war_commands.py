@@ -503,19 +503,29 @@ class WarPatrol(commands.Cog):
 
     @tasks.loop(minutes=20)
     async def war_reminder(self):
+        # 1. HEARTBEAT LOGGING 
+        print("--- [War Reminder Heartbeat] ---")
+        
         cursor = await get_safe_cursor(retries=3, delay=5)
+        if not cursor:
+            print("❌ CRITICAL: Could not acquire DB cursor for war_reminder.")
+            return
+
         try:
-            # 1. Fetch tags and the PERSISTENT STATE flag
+            # Fetch all tracked clans
             cursor.execute("SELECT clan_tag, guild_id, war_channel_id, last_war_reminder FROM servers")
             tracked_clans = cursor.fetchall()
+            print(f"DEBUG: Processing {len(tracked_clans)} clans from Database.")
 
             for clan_tag, guild_id, war_channel_id, last_sent in tracked_clans:
                 if not clan_tag or not war_channel_id:
                     continue 
 
                 try:
-                    # Fetch War Data (Standard or CWL)
+                    # 2. FETCH WAR DATA
                     war_data = await self.coc_client.get_current_war(clan_tag)
+                    
+                    # CWL Safety Check
                     if not war_data or war_data.state == "notInWar":
                         try:
                             group = await self.coc_client.get_league_group(clan_tag)
@@ -527,16 +537,21 @@ class WarPatrol(commands.Cog):
                         except coc.NotFound:
                             war_data = None
 
-                    # 2. RESET LOGIC: If war ended or isn't active, clear the flag for the next war
+                    # 3. RESET/SKIP LOGIC
                     if not war_data or war_data.state != "inWar":
+                        # If war ended/not started, but DB thinks we're in one, reset it
                         if last_sent is not None:
+                            print(f"DEBUG: War ended for {clan_tag}. Resetting DB flag.")
                             cursor.execute("UPDATE servers SET last_war_reminder = NULL WHERE clan_tag = %s", (clan_tag,))
+                            cursor.connection.commit() # CRITICAL: Save the reset
                         continue
 
-                    # 3. DETERMINISTIC LOGIC: Decide threshold
+                    # 4. THRESHOLD CALCULATION
                     seconds_left = war_data.end_time.seconds_until
                     hours_left = seconds_left / 3600
                     
+                    print(f"DEBUG: Clan {clan_tag} | State: {war_data.state} | Time Left: {hours_left:.2f}h | DB Flag: {last_sent}")
+
                     reminder_type = None
                     if hours_left <= 1 and last_sent != "final":
                         reminder_type = "final"
@@ -544,47 +559,41 @@ class WarPatrol(commands.Cog):
                         reminder_type = "warning"
 
                     if not reminder_type:
-                        continue
+                        continue # Not time for a reminder yet
 
-                    # 4. SLACKER IDENTIFICATION
+                    # 5. SLACKER IDENTIFICATION
                     is_cwl = "League" in str(type(war_data))
                     max_atks = 1 if is_cwl else 2
                     slacking_names = []
-                    cursor.execute(
-                            "SELECT player_tag, discord_id FROM players WHERE guild_id = %s", 
-                            (str(guild_id),)
-                        )
+                    
+                    # Get links for this specific guild
+                    cursor.execute("SELECT player_tag, discord_id FROM players WHERE guild_id = %s", (str(guild_id),))
                     links = {row[0]: row[1] for row in cursor.fetchall()}
-                    our_members = sorted(war_data.clan.members, key=lambda x: x.map_position)
+                    
+                    # Sort by map position (Clash players love clean lists)
+                    our_members = sorted(war_data.clan.members, key=lambda x: x.map_position or 99)
                     
                     for m in our_members:
                         if len(m.attacks) < max_atks:
                             needed = max_atks - len(m.attacks)
-
                             discord_id = links.get(m.tag)
-                            if discord_id:
-                                display_name = f"<@{discord_id}>"
-                            else:                            
-                                display_name = f"**{m.name}**"
-                                
+                            display_name = f"<@{discord_id}>" if discord_id else f"**{m.name}**"
                             slacking_names.append(f"#{m.map_position} {display_name} ({needed} left)")
 
-                    # If the threshold is hit but no one is slacking, we still update the DB
-                    # to "silence" the bot until the next threshold.
+                    # 6. SENDING THE REMINDER
                     if slacking_names:
                         channel = self.bot.get_channel(int(war_channel_id)) or await self.bot.fetch_channel(int(war_channel_id))
                         
-                        # UI Formatting
                         is_final = (reminder_type == "final")
                         time_label = "FINAL HOUR" if is_final else "4 HOURS LEFT"
                         
                         # Color logic based on score
-                        if war_data.clan.stars > war_data.opponent.stars: embed_color = 0x00ff00
-                        elif war_data.clan.stars < war_data.opponent.stars: embed_color = 0xff0000
-                        else: embed_color = 0xffff00
+                        if war_data.clan.stars > war_data.opponent.stars: embed_color = 0x00ff00 # Winning
+                        elif war_data.clan.stars < war_data.opponent.stars: embed_color = 0xff0000 # Losing
+                        else: embed_color = 0xffff00 # Tied
 
                         embed = discord.Embed(
-                            title=f"⚔️ {time_label}: War Attack Reminder",
+                            title=f"{time_label}: War Attack Reminder",
                             description=f"Clan: **{war_data.clan.name}** vs **{war_data.opponent.name}**\nPlease use your remaining attacks!",
                             color=embed_color
                         )
@@ -594,121 +603,159 @@ class WarPatrol(commands.Cog):
                             f"**{war_data.opponent.name}**: ⭐ {war_data.opponent.stars} ({war_data.opponent.destruction:.1f}%)"
                         )
                         embed.add_field(name="Scoreboard", value=f"`{scoreboard}`", inline=False)
-                        embed.add_field(name="⏳ Time Left", value=f"<t:{int(war_data.end_time.timestamp())}:R>", inline=True)
+                        embed.add_field(name="⏳ End Time", value=f"<t:{int(war_data.end_time.timestamp())}:R>", inline=True)
                         embed.add_field(name="Pending Attacks", value="\n".join(slacking_names[:20]), inline=False)
-                        embed.set_footer(text=f"War Type: {'CWL' if is_cwl else 'Standard War'}")
+                        embed.set_footer(text=f"War Type: {'CWL' if is_cwl else 'Standard'}")
 
                         await channel.send(embed=embed)
+                        print(f"✅ SUCCESS: Sent {reminder_type} reminder for {clan_tag}")
 
-                    # 5. PERSISTENCE: Mark as sent
+                    # 7. PERSISTENCE (Save state even if no one was slacking to prevent re-pings)
                     cursor.execute("UPDATE servers SET last_war_reminder = %s WHERE clan_tag = %s", (reminder_type, clan_tag))
+                    cursor.connection.commit() # CRITICAL: Save the state to the DB
 
                 except Exception as e:
-                    print(f"Task Error for {clan_tag}: {e}")
+                    print(f"❌ Task Error for clan {clan_tag}: {e}")
 
         except Exception as db_e:
-            print(f"Database Task Error: {db_e}")
+            print(f"❌ Database Loop Error: {db_e}")
         finally:
-            cursor.close() # Keep Railway memory usage low
+            if cursor:
+                cursor.close()
 
     @war_reminder.before_loop
     async def before_war_reminder(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="test_reminder", description="DEBUG: Force a dry-run of the war reminder logic")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def test_reminder(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+    # @app_commands.command(name="test_reminder", description="DEBUG: Force a dry-run of the war reminder logic")
+    # @app_commands.checks.has_permissions(administrator=True)
+    # async def test_reminder(self, interaction: discord.Interaction):
+    #     """Manually triggers the reminder logic for testing and returns a diagnostic report."""
+    #     await interaction.response.defer(ephemeral=True)
         
-        # 1. Acquire cursor and fetch config for THIS guild
-        cursor = await get_safe_cursor(retries=3, delay=5)
-        try:
-            guild_id = str(interaction.guild.id)
-            cursor.execute(
-                "SELECT clan_tag, war_channel_id, last_war_reminder FROM servers WHERE guild_id = %s", 
-                (guild_id,)
-            )
-            row = cursor.fetchone()
+    #     # 1. Acquire cursor and fetch config for THIS guild
+    #     cursor = await get_safe_cursor(retries=3, delay=5)
+    #     try:
+    #         guild_id = str(interaction.guild.id)
+    #         cursor.execute(
+    #             "SELECT clan_tag, war_channel_id, last_war_reminder FROM servers WHERE guild_id = %s", 
+    #             (guild_id,)
+    #         )
+    #         row = cursor.fetchone()
             
-            if not row or not row[0]:
-                return await interaction.followup.send("❌ This server hasn't configured a clan tag yet.")
+    #         if not row or not row[0]:
+    #             return await interaction.followup.send("❌ This server hasn't configured a clan tag yet. Use /setclantag.")
             
-            clan_tag, war_channel_id, last_sent = row
+    #         clan_tag, war_channel_id, last_sent = row
             
-            # 2. Fetch War Data (Standard or CWL)
-            war_data = await self.coc_client.get_current_war(clan_tag)
-            if not war_data or war_data.state == "notInWar":
-                try:
-                    group = await self.coc_client.get_league_group(clan_tag)
-                    if group:
-                        async for cwl_war in group.get_wars_for_clan(clan_tag):
-                            if cwl_war.state != "notInWar":
-                                war_data = cwl_war
-                                break
-                except coc.NotFound:
-                    war_data = None
+    #         # 2. Fetch War Data (Standard or CWL)
+    #         try:
+    #             # First, try standard war
+    #             war_data = await self.coc_client.get_current_war(clan_tag)
+    #         except coc.NotFound:
+    #             return await interaction.followup.send(f"❌ API Error: Clan tag `{clan_tag}` was not found. Check the tag in your DB.")
+    #         except Exception as e:
+    #             print(f"Standard war fetch failed: {e}")
+    #             war_data = None
 
-            if not war_data or war_data.state != "inWar":
-                return await interaction.followup.send(f"💤 No active war found for `{clan_tag}`.")
+    #         # If not in a standard war, check CWL
+    #         if not war_data or war_data.state == "notInWar":
+    #             try:
+    #                 group = await self.coc_client.get_league_group(clan_tag)
+    #                 if group:
+    #                     async for cwl_war in group.get_wars_for_clan(clan_tag):
+    #                         if cwl_war.state != "notInWar":
+    #                             war_data = cwl_war
+    #                             break
+    #             except coc.NotFound:
+    #                 # This is NORMAL if the clan isn't in CWL
+    #                 print(f"DEBUG: Clan {clan_tag} is not in a CWL group.")
+    #                 if not war_data: war_data = None 
+    #             except Exception as e:
+    #                 print(f"CWL fetch failed: {e}")
 
-            # 3. Simulate Logic Thresholds
-            seconds_left = war_data.end_time.seconds_until
-            hours_left = seconds_left / 3600
+    #         # 3. Simulate Logic Thresholds
+    #         seconds_left = war_data.end_time.seconds_until
+    #         hours_left = seconds_left / 3600
             
-            # This mimics your background loop's timing logic
-            simulated_type = "None"
-            if hours_left <= 1: simulated_type = "final"
-            elif hours_left <= 4: simulated_type = "warning"
+    #         # Determine what the bot 'thinks' it should send
+    #         simulated_type = "None"
+    #         if hours_left <= 1: 
+    #             simulated_type = "final"
+    #         elif hours_left <= 4: 
+    #             simulated_type = "warning"
 
-            # 4. Slacker Identification (Mentions Logic)
-            cursor.execute("SELECT player_tag, discord_id FROM players WHERE guild_id = %s", (guild_id,))
-            links = {r[0]: r[1] for r in cursor.fetchall()}
+    #         # 4. Slacker Identification (Mentions Logic)
+    #         cursor.execute("SELECT player_tag, discord_id FROM players WHERE guild_id = %s", (guild_id,))
+    #         links = {r[0]: r[1] for r in cursor.fetchall()}
             
-            is_cwl = "League" in str(type(war_data))
-            max_atks = 1 if is_cwl else 2
-            slacking_names = []
+    #         # Determine War Type for Attack Count
+    #         is_cwl = "League" in str(type(war_data))
+    #         max_atks = 1 if is_cwl else 2
+    #         slacking_names = []
             
-            # Filter for active war lineup only
-            active_lineup = [m for m in war_data.clan.members if m.map_position is not None]
-            our_members = sorted(active_lineup, key=lambda x: x.map_position)
+    #         # Filter for active war lineup only
+    #         active_lineup = [m for m in war_data.clan.members if m.map_position is not None]
+    #         our_members = sorted(active_lineup, key=lambda x: x.map_position)
             
-            for m in our_members:
-                if len(m.attacks) < max_atks:
-                    discord_id = links.get(m.tag)
-                    display_name = f"<@{discord_id}>" if discord_id else f"**{m.name}**"
-                    slacking_names.append(f"#{m.map_position} {display_name} ({max_atks - len(m.attacks)} left)")
+    #         for m in our_members:
+    #             if len(m.attacks) < max_atks:
+    #                 needed = max_atks - len(m.attacks)
+    #                 discord_id = links.get(m.tag)
+                    
+    #                 if discord_id:
+    #                     display_name = f"<@{discord_id}>"
+    #                 else:
+    #                     display_name = f"**{m.name}** (Unlinked)"
+                        
+    #                 slacking_names.append(f"#{m.map_position} {display_name} ({needed} left)")
 
-            # --- DEBUG REPORT ---
-            status_report = (
-                f"📊 **Dry Run Report for `{clan_tag}`**\n"
-                f"- **Type:** `{'CWL' if is_cwl else 'Standard'}` | **Attacks Required:** `{max_atks}`\n"
-                f"- **Time Left:** `{hours_left:.2f} hours`\n"
-                f"- **Current DB State:** `{last_sent or 'None'}`\n"
-                f"- **Simulated Trigger:** `{simulated_type}`\n"
-                f"- **Would send now?** `{'✅ YES' if simulated_type != 'None' and simulated_type != last_sent else '❌ NO'}`\n"
-                f"--------------------------------"
-            )
+    #         # --- 5. DRY RUN REPORT ---
+    #         # Logic check: Would the bot actually send this in the background loop?
+    #         will_trigger = (simulated_type != "None") and (simulated_type != last_sent)
+            
+    #         status_report = (
+    #             f"📊 **Dry Run Report for `{clan_tag}`**\n"
+    #             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    #             f"• **War Type:** `{'CWL' if is_cwl else 'Standard'}`\n"
+    #             f"• **Time Remaining:** `{hours_left:.2f} hours`\n"
+    #             f"• **DB Saved State:** `{last_sent if last_sent else 'NULL'}`\n"
+    #             f"• **Target Threshold:** `{simulated_type}`\n"
+    #             f"• **Will Trigger Now?** `{'✅ YES' if will_trigger else '❌ NO'}`\n"
+    #             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    #             f"*Reason for NO: Either not in a 4h/1h window, or this reminder was already sent according to the DB.*"
+    #         )
 
-            await interaction.followup.send(status_report)
+    #         await interaction.followup.send(status_report)
 
-            # Send the actual embed preview so you can check formatting
-            if slacking_names:
-                time_label = "FINAL HOUR" if simulated_type == "final" else "4 HOURS LEFT"
-                embed = discord.Embed(
-                    title=f"⚔️ [PREVIEW] {time_label}: War Reminder",
-                    description=f"Clan: **{war_data.clan.name}** vs **{war_data.opponent.name}**",
-                    color=0x00ff00 if war_data.clan.stars >= war_data.opponent.stars else 0xff0000
-                )
-                embed.add_field(name="Pending Attacks", value="\n".join(slacking_names[:20]), inline=False)
-                embed.set_footer(text=f"This is a test. Links found: {len(links)}")
-                await interaction.followup.send(embed=embed)
-            else:
-                await interaction.followup.send("✅ No slackers found! Reminder would not trigger.")
+    #         # 6. SEND THE EMBED PREVIEW
+    #         if slacking_names:
+    #             time_label = "FINAL HOUR" if simulated_type == "final" else "4 HOURS LEFT"
+                
+    #             # Dynamic Embed Color
+    #             if war_data.clan.stars > war_data.opponent.stars: color = 0x00ff00 # Winning
+    #             elif war_data.clan.stars < war_data.opponent.stars: color = 0xff0000 # Losing
+    #             else: color = 0xffff00 # Tied
 
-        except Exception as e:
-            await interaction.followup.send(f"⚠️ Error during test: `{e}`")
-        finally:
-            cursor.close()
+    #             embed = discord.Embed(
+    #                 title=f"⚔️ [DEBUG PREVIEW] {time_label}",
+    #                 description=f"Clan: **{war_data.clan.name}** vs **{war_data.opponent.name}**",
+    #                 color=color
+    #             )
+    #             embed.add_field(name="Pending Attacks", value="\n".join(slacking_names[:20]), inline=False)
+    #             embed.add_field(name="Database Check", value=f"Target Channel: <#{war_channel_id}>\nLinks in DB: {len(links)}", inline=False)
+    #             embed.set_footer(text="If this were a real run, the DB would update 'last_war_reminder' now.")
+                
+    #             await interaction.followup.send(embed=embed)
+    #         else:
+    #             await interaction.followup.send("✅ **Check Complete:** No slackers found on the war map. No reminder would be sent.")
+
+    #     except Exception as e:
+    #         import traceback
+    #         traceback.print_exc()
+    #         await interaction.followup.send(f"⚠️ **Debug Error:** `{e}`\nCheck Railway logs for traceback.")
+    #     finally:
+    #         cursor.close()
 
 # --- CRITICAL SETUP UPDATE ---
 async def setup(bot):
