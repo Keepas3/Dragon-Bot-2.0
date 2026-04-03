@@ -50,13 +50,16 @@ class WarCommands(commands.Cog):
             if not war_data or war_data.state == "notInWar":
                 return await interaction.followup.send("No active war or CWL round found.")
 
-            # We check if it's CWL by looking for league-specific properties
-            # is_cwl = getattr(war_data, 'is_league_entry', False) or hasattr(war_data, 'war_tag')
-            # source = "CWL" if is_cwl else "Normal War"
         
-            is_cwl = "League" in str(type(war_data))
-            
-            source = "CWL" if is_cwl else "Standard"
+            max_atks = getattr(war_data, 'attacks_per_member', 0)
+            if max_atks == 0:
+                is_cwl = "League" in str(type(war_data)) or hasattr(war_data, 'war_tag')
+                max_atks = 1 if is_cwl else 2
+            else:
+                is_cwl = (max_atks == 1)
+
+            source_label = "CWL" if is_cwl else "Standard"
+            print(is_cwl, max_atks, source_label)
 
             # Ensure our clan is always 'our'
             if war_data.clan.tag == db_tag:
@@ -86,7 +89,7 @@ class WarCommands(commands.Cog):
 
                 embed = discord.Embed(
                     title=f"{our.name} vs {opp.name}",
-                    description=f"**Type:** {source}\nClan Tag: `{our.tag}` | Opp. Tag: `{opp.tag}`",
+                    description=f"**Type:** {source_label}\nClan Tag: `{our.tag}` | Opp. Tag: `{opp.tag}`",
                     color=embed_color
                 )
                 
@@ -106,8 +109,6 @@ class WarCommands(commands.Cog):
                 embed.add_field(name="Opp. Destruction", value=f"💥 `{round(opp.destruction, 1)}%/100%`", inline=True)
 
                 # CWL has 1 attack per person, Normal has 2
-                atks_per_person = 1 if is_cwl else 2
-                total_atks = war_data.team_size * atks_per_person
                 embed.add_field(name="3 Stars", value=f"`{our_triples}/{war_data.team_size}`", inline=True) 
                 embed.add_field(name="Opp. 3 Stars", value=f"`{opp_triples}/{war_data.team_size}`", inline=True) 
 
@@ -182,7 +183,7 @@ class WarCommands(commands.Cog):
 
                 lines = [
                     "```yaml",
-                    f"{source} War: {our.name} vs {opp.name}",
+                    f"{source_label} War: {our.name} vs {opp.name}",
                     f"State: {war_data.state.value.capitalize()}",
                     f"{timer_label}: {time_display}",
                     ""
